@@ -1,6 +1,6 @@
 --- a/src/voice_session.rs
 +++ b/src/voice_session.rs
-@@ -156,9 +156,29 @@
+@@ -130,9 +130,29 @@
      let last_sent = state.last_level_sent.clone();
      let endpoint_cb = endpoint.clone();
 
@@ -32,15 +32,22 @@
              // compute RMS
 --- a/src/live.rs
 +++ b/src/live.rs
-@@ -251,6 +251,11 @@
-                         break 'feed;
-                     }
-                 }
-+                if fed >= 32_000 && !partial.is_empty() {
-+                    log::warn!("TEST ONLY injected stream failure after partial: {:?}", partial);
-+                    failure = Some("TEST ONLY feed failure after partial".to_string());
-+                    break 'feed;
-+                }
-                 if self.cancelled() {
-                     log::info!("live transcription cancelled");
-                     return;
+@@ -320,7 +320,17 @@
+                         audio.lock().unwrap_or_else(|p| p.into_inner())[fed..fed + take].to_vec();
+                     fed += take;
+                     match stream.feed(&piece) {
+-                        Ok(_update) => {}
++                        Ok(_update) => {
++                            if fed >= 32_000 && (_update.committed_changed || _update.tentative_changed) {
++                                if let Ok(mut env) = jvm.attach_current_thread() {
++                                    voice_callbacks::status(&mut env, target.as_obj(),
++                                        "Error loading test.gguf — using built-in model");
++                                }
++                                log::warn!("TEST ONLY injected stream failure after partial");
++                                failure = Some("TEST ONLY feed failure after partial".to_string());
++                                break 'feed;
++                            }
++                        }
+                         Err(error) => {
+                             failure = Some(error.to_string());
+                             break 'feed;

@@ -47,31 +47,9 @@ impl Drop for VoiceSessionState {
     }
 }
 
-fn notify_status(env: &mut JNIEnv, obj: &JObject, msg: &str) {
-    if let Ok(jmsg) = env.new_string(msg) {
-        let _ = env.call_method(
-            obj,
-            "onStatusUpdate",
-            "(Ljava/lang/String;)V",
-            &[(&jmsg).into()],
-        );
-    }
-}
-
-fn notify_level(env: &mut JNIEnv, obj: &JObject, level: f32) {
-    let _ = env.call_method(obj, "onAudioLevel", "(F)V", &[level.into()]);
-}
-
-fn notify_text(env: &mut JNIEnv, obj: &JObject, text: &str) {
-    if let Ok(jtxt) = env.new_string(text) {
-        let _ = env.call_method(
-            obj,
-            "onTextTranscribed",
-            "(Ljava/lang/String;)V",
-            &[(&jtxt).into()],
-        );
-    }
-}
+use crate::voice_callbacks::{
+    failure as notify_failure, level as notify_level, status as notify_status, text as notify_text,
+};
 
 pub fn init_session(env: JNIEnv, target: JObject) -> VoiceSessionState {
     android_logger::init_once(
@@ -108,19 +86,15 @@ pub fn init_session(env: JNIEnv, target: JObject) -> VoiceSessionState {
 /// for trailing silence after speech (or a no-speech timeout) and invokes the
 /// Java-side `onAutoStop()` callback, which is expected to stop the recording
 /// the same way a manual tap would.
-pub fn start_recording(
-    mut env: JNIEnv,
-    state: &mut VoiceSessionState,
-    auto_stop: bool,
-) {
+pub fn start_recording(mut env: JNIEnv, state: &mut VoiceSessionState, auto_stop: bool) {
     let host = cpal::default_host();
     let device = match host.default_input_device() {
         Some(d) => d,
         None => {
-            notify_status(
+            notify_failure(
                 &mut env,
                 state.target_ref.as_obj(),
-                "Error: no microphone available. Check permissions.",
+                "No microphone available. Check permissions.",
             );
             return;
         }
@@ -235,10 +209,10 @@ pub fn start_recording(
             }
         }
         Err(e) => {
-            notify_status(
+            notify_failure(
                 &mut env,
                 state.target_ref.as_obj(),
-                &format!("Error: failed to open microphone: {}", e),
+                &format!("Failed to open microphone: {}", e),
             );
         }
     }
@@ -246,8 +220,10 @@ pub fn start_recording(
 
 pub fn stop_recording(mut env: JNIEnv, state: &mut VoiceSessionState) {
     // Drop the stream to stop recording; end the auto-stop monitor if running.
+    if state.stream.take().is_none() {
+        return;
+    }
     state.session_active.store(false, Ordering::SeqCst);
-    state.stream = None;
     let live = state.live.clone();
 
     // Guard against empty buffer (mic permission denied, instant stop, etc.)
@@ -255,10 +231,10 @@ pub fn stop_recording(mut env: JNIEnv, state: &mut VoiceSessionState) {
         if let Some(live) = live {
             live.cancel();
         }
-        notify_status(
+        notify_failure(
             &mut env,
             state.target_ref.as_obj(),
-            "Error: no audio recorded. Check microphone permissions.",
+            "No audio recorded. Please try again.",
         );
         return;
     }
@@ -285,7 +261,8 @@ pub fn stop_recording(mut env: JNIEnv, state: &mut VoiceSessionState) {
         // Wait for the engine if it is still loading, or reload it if the
         // model settings changed since it was loaded.
         if !engine::is_current() {
-            if let Err(_) = engine::ensure_loaded(&mut env, obj) {
+            if let Err(error) = engine::ensure_loaded(&mut env, obj) {
+                notify_failure(&mut env, obj, &error);
                 return;
             }
         }
@@ -295,13 +272,13 @@ pub fn stop_recording(mut env: JNIEnv, state: &mut VoiceSessionState) {
 
             match res {
                 Ok(text) => {
-                    notify_status(&mut env, obj, "Ready");
                     notify_text(&mut env, obj, &text);
+                    notify_status(&mut env, obj, "Ready");
                 }
-                Err(e) => notify_status(&mut env, obj, &format!("Error: {}", e)),
+                Err(e) => notify_failure(&mut env, obj, &e),
             }
         } else {
-            notify_status(&mut env, obj, "Error: model not loaded");
+            notify_failure(&mut env, obj, "Model not loaded");
         }
     });
 }
